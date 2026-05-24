@@ -1,78 +1,186 @@
-# coach_demo
+# GoogleスプシとWeb上DBの同期デモ
 
-Google Form -> Google Spreadsheet -> Google Apps Script -> Django API -> PostgreSQL の同期を確認するための小規模デモアプリ。
+Google Form の回答を、 **Google スプレッドシート** と **Web上のデータベース（Railwayでデプロイ）** の両方に蓄積するデモ。
+FormとDBの仲介にWebアプリケーションフレームワークであるDjangoを使用。
 
-Googleフォームの回答をスプレッドシートだけでなくWeb上のPostgreSQLにも蓄積できることを開発者向けに確認する目的のもの。
+## デモ URL
 
-## 使用技術
+| 用途 | URL |
+|---|---|
+| Google Form（回答送信） | https://forms.gle/NCXtchA7FdCB5tN5A |
+| Django 管理画面（DB 確認） | https://gas-django-sync-demo-production.up.railway.app/admin/ |
 
-- Python 3.12
-- Django 5
-- Django REST Framework
-- PostgreSQL
-- Docker / docker-compose
-- Django Admin
+管理画面のログイン情報は別途共有。
 
-## セットアップ
-
-`.env.example` をコピーして `.env` を作成
-
-```bash
-cp .env.example .env
-```
-
-コンテナを起動
-
-```bash
-docker compose up --build
-```
-
-## マイグレーション
-
-別ターミナルで以下を実行
-
-```bash
-docker compose exec web python manage.py migrate
-```
-
-## 管理ユーザー作成
-
-```bash
-docker compose exec web python manage.py createsuperuser
-```
-
-管理画面は以下で確認可能↓
+## 仕組み
 
 ```text
-http://localhost:8000/admin/
+Google Form 送信
+    ├─→ Google スプレッドシート（自動保存）
+    └─→ Google Apps Script（onFormSubmit）
+            └─→ Django API（Railway）
+                    └─→ PostgreSQL（Railway）
 ```
 
-Adminでは `DemoRequest` の `id`, `student_name`, `submitted_at`, `created_at` を一覧表示している。
+Google Formから情報を送信すると、スプレッドシートへの保存に加えて、Apps ScriptがRailway上のAPIを叩き、同じ内容がWeb上のDBにも保存される。
+本格的にコミュニティ全体の情報を移そうとしたらRailwayのHobbyプランにする必要があるかもしれない（月700-800円くらいかかる）。
 
-## API
+## 動作確認手順
+
+1. [Google Form](https://forms.gle/NCXtchA7FdCB5tN5A) を開き、1件回答を送信する
+2. リンクされた Google スプレッドシートに行が追加されることを確認する
+3. [Django 管理画面](https://gas-django-sync-demo-production.up.railway.app/admin/) にログインする
+4. **Demo requests**（`DemoRequest`）に、送信した **生徒の名前** と同じレコードがあることを確認する
+
+3つとも一致すれば、デモは正常動作。
+
+---
+
+## GAS 側の再現手順
+
+自分の Google Form + スプレッドシート + Apps Script で同じ仕組みを再現する場合は、以下↓
+
+**前提:** Railway上のDjangoAPIはすでに公開済み。GASからは次のURLにPOST。
+
+```text
+https://gas-django-sync-demo-production.up.railway.app/api/demo/requests/
+```
+
+再現実験する場合API キー（`DEMO_API_KEY`）は別途共有します。後で設定に必要。
+
+### 1. Google Form を用意する
+
+[デモ Form](https://forms.gle/NCXtchA7FdCB5tN5A) と同じ構成にする。
+
+### 2. Formをスプレッドシートにリンクする
+
+### 3. Apps Script を設定する
+
+Apps Scriptのデータ送信部分は以下：
+
+```javascript
+const API_URL = "https://gas-django-sync-demo-production.up.railway.app/api/demo/requests/";
+
+function onFormSubmit(e) {
+  const API_KEY = PropertiesService.getScriptProperties().getProperty("DEMO_API_KEY");
+
+  if (!API_KEY) {
+    throw new Error("DEMO_API_KEY が Script Properties に設定されていません");
+  }
+
+  const values = e.namedValues;
+
+  const studentName = values["生徒の名前"] ? values["生徒の名前"][0] : null;
+  const problemText = values["課題"] ? values["課題"][0] : null;
+
+  if (!studentName || !problemText) {
+    throw new Error(
+      "Form の項目名が一致していません。実際のキー: " + Object.keys(values).join(", ")
+    );
+  }
+
+  const payload = {
+    student_name: studentName,
+    problem_text: problemText,
+    submitted_at: new Date().toISOString(),
+    raw_payload: values,
+  };
+
+  const options = {
+    method: "post",
+    contentType: "application/json",
+    headers: { "X-DEMO-API-KEY": API_KEY },
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true,
+  };
+
+  const response = UrlFetchApp.fetch(API_URL, options);
+  const status = response.getResponseCode();
+  const body = response.getContentText();
+
+  Logger.log("status: " + status);
+  Logger.log("body: " + body);
+
+  if (status !== 201) {
+    throw new Error("API error: status=" + status + " body=" + body);
+  }
+}
+
+function testOnFormSubmit() {
+  onFormSubmit({
+    namedValues: {
+      "生徒の名前": ["テスト太郎"],
+      "課題": ["テスト課題"],
+      "タイムスタンプ": ["2026/05/24 12:00:00"],
+    },
+  });
+}
+```
+
+### 4. Script Properties を設定する
+
+Apps Script → **プロジェクトの設定** → **スクリプト プロパティ** に追加
+
+| 名前 | 値 |
+|---|---|
+| `DEMO_API_KEY` | 別途共有の API キー |
+
+### 5. トリガーを設定する
+
+Apps Script 左メニュー **トリガー** → **トリガーを追加**
+
+| 項目 | 値 |
+|---|---|
+| 実行する関数 | `onFormSubmit` |
+| デプロイ時に実行 | `Head` |
+| イベントのソース | スプレッドシートから |
+| イベントの種類 | フォーム送信時 |
+| エラー通知設定 | すぐに通知を受け取る（推奨） |
+
+以下の権限を許可する：
+
+- Google スプレッドシートの表示・編集
+- Google フォームの表示・管理（Form 連携時）
+- 外部サービスへの接続（Railway API への POST）
+
+### 6. 動作テスト
+
+#### 手動テスト（GAS エディタ）
+
+1. 関数プルダウンで `testOnFormSubmit` を選択
+2. **実行**
+3. **実行数** のログで `status: 201` を確認
+
+#### 通しテスト（Form 送信）
+
+1. Form から1件送信
+2. スプレッドシートに行が増える
+3. [管理画面](https://gas-django-sync-demo-production.up.railway.app/admin/) の **DemoRequest** に同じ内容がある
+
+---
+
+## API 仕様（参考）
 
 ### POST /api/demo/requests/
 
-Google Apps Script などからJSONをPOSTすると、PostgreSQLへ保存する
+| 項目 | 内容 |
+|---|---|
+| URL | `https://gas-django-sync-demo-production.up.railway.app/api/demo/requests/` |
+| 認証 | リクエストヘッダー `X-DEMO-API-KEY` |
+| Content-Type | `application/json` |
 
-認証には `X-DEMO-API-KEY` ヘッダーを使用。値は `.env` の `DEMO_API_KEY` と一致させる。
+リクエスト例:
 
-```bash
-curl -X POST http://localhost:8000/api/demo/requests/ \
-  -H "Content-Type: application/json" \
-  -H "X-DEMO-API-KEY: your-secret-key" \
-  -d '{
-    "student_name": "あいうえお",
-    "problem_text": "敵を見る",
-    "submitted_at": "2026-05-22T18:30:00+09:00",
-    "raw_payload": {
-      "student_name": "あいうえお",
-      "problem_text": "敵を見る"
-    }
-  }'
+```json
+{
+  "student_name": "テスト太郎",
+  "problem_text": "動作確認",
+  "submitted_at": "2026-05-24T12:00:00+09:00",
+  "raw_payload": {}
+}
 ```
 
-成功時レスポンス例
+成功時レスポンス:
 
 ```json
 {
@@ -81,111 +189,11 @@ curl -X POST http://localhost:8000/api/demo/requests/ \
 }
 ```
 
-API Keyが不正または未指定の場合は `403 Forbidden` を返す。
+---
 
-## Google Apps Script からの接続例
-
-Google Form送信時にDjango APIへPOSTするサンプル。
-
-```javascript
-function onFormSubmit(e) {
-const values = e.namedValues;
-
-const payload = {
-student_name: values["生徒名"][0],
-problem_text: values["課題"][0],
-submitted_at: new Date().toISOString(),
-raw_payload: values
-};
-
-const options = {
-method: "post",
-contentType: "application/json",
-headers: {
-"X-DEMO-API-KEY": "your-secret-key"
-},
-payload: JSON.stringify(payload),
-muteHttpExceptions: true
-};
-
-UrlFetchApp.fetch(
-"http://localhost:8000/api/demo/requests/",
-options
-);
-}
-```
-
-Google Apps Script はGoogle側のサーバーで実行されるため、実際にGASからローカルPCの `localhost:8000` へ直接アクセスすることはできない。ローカル検証では RailwayでDjango APIを一時公開し、URLを `https://.../api/demo/requests/` に変更する。
-
-## Railwayで公開する場合
-
-このリポジトリにはRailway向けの `railway.json` を含めている。RailwayではDockerfileでビルドし、GunicornでDjangoを起動する。Django Adminの静的ファイルはWhiteNoiseで配信する。
-
-### Railway側でやること
-
-1. Railwayで新規Projectを作成
-2. GitHubリポジトリ、またはRailway CLIからこのDjangoアプリを追加
-3. 同じProject内にPostgreSQL serviceを追加
-4. Djangoアプリ側のVariablesにPostgreSQLの `DATABASE_URL` を参照できるように設定
-5. Djangoアプリ側のVariablesに必要な環境変数を追加
-6. Deployを実行
-
-RailwayのPostgreSQLを追加すると、DB接続用の `DATABASE_URL` を使える。DjangoアプリのVariablesで `DATABASE_URL` が設定されていることを確認する。
-
-最低限必要なVariables:
-
-```text
-DJANGO_SECRET_KEY=本番用の長いランダム文字列
-DJANGO_DEBUG=false
-DEMO_API_KEY=your-secret-key
-DATABASE_URL=${{Postgres.DATABASE_URL}}
-```
-
-Railwayの公開ドメインを使う場合、`RAILWAY_PUBLIC_DOMAIN` から `ALLOWED_HOSTS` と `CSRF_TRUSTED_ORIGINS` へ自動反映される。独自ドメインや手動指定を使う場合は以下も追加する。
-
-```text
-DJANGO_ALLOWED_HOSTS=your-app-name.up.railway.app
-CSRF_TRUSTED_ORIGINS=https://your-app-name.up.railway.app
-```
-
-`railway.json` の `preDeployCommand` で、デプロイ時に以下が実行される。
-
-```bash
-python manage.py migrate
-```
-
-手動でマイグレーションを実行する場合はRailway CLIで以下を実行する。
-
-```bash
-railway run python manage.py migrate
-```
-
-管理ユーザーを作成する。
-
-```bash
-railway run python manage.py createsuperuser
-```
-
-ヘルスチェック用URL
-
-```text
-https://your-app-name.up.railway.app/health/
-```
-
-GASから接続する場合は、送信先をRailwayのURLに変更する。
-
-```javascript
-UrlFetchApp.fetch(
-"https://your-app-name.up.railway.app/api/demo/requests/",
-options
-);
-```
-
-## 開発メモ
+## 仕様メモ
 
 - モデル: `requests_demo.models.DemoRequest`
 - API: `requests_demo.views.DemoRequestCreateAPIView`
 - 認証: `requests_demo.permissions.HasDemoApiKey`
-- DB接続: 環境変数 `DATABASE_URL`
-
-ここから色々広げるかもしれないのでSerializer、View、URLをアプリ内で分離済。
+- DB 接続: 環境変数 `DATABASE_URL`
